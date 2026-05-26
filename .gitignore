@@ -1,0 +1,37 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# env & secrets
+.env
+.env*.local
+!.env.example
+
+# databases (local dev)
+data/
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+
+# next.js
+frontend/.next/
+frontend/out/
+
+# build / logs
+dist/
+build/
+*.log
+npm-debug.log*
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
