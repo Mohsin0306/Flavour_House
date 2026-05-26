@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import bcrypt from "bcryptjs";
 import fs from "fs";
 import path from "path";
 
@@ -10,14 +10,26 @@ export type DbResult = {
   rowsAffected?: number;
 };
 
-let sqlite: Database.Database | null = null;
+let sqlite: import("better-sqlite3").Database | null = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let libsql: any = null;
 let initialized = false;
 
+function isVercel() {
+  return Boolean(process.env.VERCEL);
+}
+
 function useTurso() {
   const url = process.env.LIBSQL_URL ?? "";
   return url.startsWith("libsql://") || url.startsWith("https://");
+}
+
+function assertDbConfig() {
+  if (isVercel() && !useTurso()) {
+    throw new Error(
+      "Database not configured for Vercel. Set LIBSQL_URL and LIBSQL_AUTH_TOKEN (Turso) in project Environment Variables."
+    );
+  }
 }
 
 function getSqlitePath() {
@@ -26,33 +38,40 @@ function getSqlitePath() {
   return path.join(dataDir, "restaurant.db");
 }
 
-function getSqlite() {
+async function getSqlite() {
   if (!sqlite) {
-    try {
-      sqlite = new Database(getSqlitePath());
-      sqlite.pragma("journal_mode = WAL");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("NODE_MODULE_VERSION")) {
-        throw new Error(
-          "Database module needs a rebuild. Run: cd frontend && npm rebuild better-sqlite3 && npm run dev"
-        );
-      }
-      throw e;
-    }
+    const Database = (await import("better-sqlite3")).default;
+    sqlite = new Database(getSqlitePath());
+    sqlite.pragma("journal_mode = WAL");
   }
   return sqlite;
 }
 
 async function getLibsql() {
   if (!libsql) {
+    if (!process.env.LIBSQL_URL) {
+      throw new Error("LIBSQL_URL is not set");
+    }
     const { createClient } = await import("@libsql/client");
     libsql = createClient({
-      url: process.env.LIBSQL_URL!,
+      url: process.env.LIBSQL_URL,
       authToken: process.env.LIBSQL_AUTH_TOKEN,
     });
   }
   return libsql;
+}
+
+function normalizeRows(rows: unknown[]): Row[] {
+  return rows.map((row) => {
+    if (row && typeof row === "object" && !Array.isArray(row)) {
+      const out: Row = {};
+      for (const [k, v] of Object.entries(row as Record<string, unknown>)) {
+        out[k] = v;
+      }
+      return out;
+    }
+    return row as Row;
+  });
 }
 
 const SCHEMA = [
@@ -126,17 +145,19 @@ export async function dbExecute(
   sql: string,
   args: (string | number | null)[] = []
 ): Promise<DbResult> {
+  assertDbConfig();
+
   if (useTurso()) {
     const client = await getLibsql();
     const result = await client.execute({ sql, args });
     return {
-      rows: result.rows as Row[],
+      rows: normalizeRows(result.rows as unknown[]),
       lastInsertRowid: result.lastInsertRowid,
       rowsAffected: result.rowsAffected,
     };
   }
 
-  const db = getSqlite();
+  const db = await getSqlite();
   const trimmed = sql.trim().toUpperCase();
   if (trimmed.startsWith("SELECT")) {
     const rows = db.prepare(sql).all(...args) as Row[];
@@ -150,11 +171,27 @@ export async function dbExecute(
   };
 }
 
+async function seedAdminIfNeeded() {
+  const count = await dbExecute("SELECT COUNT(*) as c FROM admins");
+  if (Number(rowVal(count.rows[0], "c")) > 0) return;
+
+  const email = process.env.ADMIN_EMAIL || "admin@restaurant.com";
+  const password = process.env.ADMIN_PASSWORD || "admin123";
+  const hash = bcrypt.hashSync(password, 10);
+  await dbExecute("INSERT INTO admins (email, password_hash, name) VALUES (?, ?, ?)", [
+    email,
+    hash,
+    "Admin",
+  ]);
+}
+
 export async function initDb() {
   if (initialized) return;
+  assertDbConfig();
   for (const sql of SCHEMA) {
     await dbExecute(sql);
   }
+  await seedAdminIfNeeded();
   initialized = true;
 }
 
@@ -166,7 +203,8 @@ export function rowVal<T>(row: Row, key: string): T {
   return row[key] as T;
 }
 
-/** @deprecated use dbExecute */
-export function getDb() {
-  return { execute: (opts: { sql: string; args?: (string | number | null)[] }) => dbExecute(opts.sql, opts.args ?? []) };
+export function getDbMode() {
+  if (useTurso()) return "turso";
+  if (isVercel()) return "vercel-unconfigured";
+  return "local-sqlite";
 }
